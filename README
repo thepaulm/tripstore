@@ -1,0 +1,179 @@
+tripstore: (for getting up and going see "- using" below)
+
+- compiling:
+
+    This is entirely written in C. I wasn't sure what language you wanted to
+see, but you mentioned C in your job description so I figured that was a good
+choice.
+
+    This should compile on most linux flavors. I used the epoll interface, so
+it doesn't compile on the mac, but that could be made to work utilizing the
+aoi interface.
+
+    The only dependancy which you may not have on your system is scons. Scons
+is a build system writting in python and I have gotten used to using it instead
+of make. I like it because it does the right thing wrt dependancies, and since
+it's python it make it easier for (at least for me) to get certain things
+done.
+
+- overall architecture
+
+    tripgen connects to tripstore via tcp on the specified port (default to
+8637) and generates the trip events. It will start up as many threads as
+you tell it (defaults to 500) and they each will manage their own connection
+and event generation.
+
+    tripstore listens for tripgen connections and manages the connections
+via epoll.
+
+    I used the sqlite library for storage. I chose it for the following
+properties:
+
+    1) It will configure for in memory storage
+    2) Has reasonably performance for storage and indexing
+    3) Has the aggregate functions I needed.
+
+    To prevent id collisions, the tripstore allocates trip ids for newly
+incoming tripgen connections.
+
+
+- using
+
+     To compile, just runs "scons".
+
+     There are two binaries which get build: tripgen and tripstore. These will
+live in the build/ directory. They both give syntax with the -h option:
+
+-----------------------------------------------------------------------------
+tripgen: generate trip data
+    -h (--host): host to connect to
+    -p (--port): port to connect to
+    -x (--minlong): minimum longitude values
+    -X (--maxlong): maximum longitude values
+    -y (--minlat): minimum latitude values
+    -Y (--maxlat): maximum latitude values
+    -m (--minmins): minimum trip minutes
+    -M (--maxmins): maximum trip minutes
+    -t (--threads): how many concurrent threads
+    -h (--help): this message
+
+By default, tripgen will connect to host localhost on port 8637,
+minlong -122.308170, maxlong -122.225420, minlat 37.424450, maxlat 37.484790,
+minmins 2.000000, maxmins 10.000000, and threads 500.
+You many omit or specify each any any of these arguments.
+-----------------------------------------------------------------------------
+tripstore: store trip data in memory
+    -p (--port): port to listen on for tripgen
+    -q (--query-port): port to listen on for queries
+    -h (--help): this message
+By default tripstore will listen on 8637 for tripgen and 8638 for queries.
+-----------------------------------------------------------------------------
+
+    Running both of these on the same machine with no options will start up
+500 threads of tripgen connecting to tripstore. Note that the default
+min/max minutes for tripgen is {2,10}. To run a quick test you may want to
+set these values lower to get more interesting data quickly. The minutes
+arguments will take float values, so you can specify minutes for example
+of 0.1.
+
+    tripgen assumes a flat rate of $4 per minute for fare calculations.
+
+- querying
+
+    tripstore opens up port 8638 for accepting queries. Each of the 3 requested
+queries correspond to a report (report1, report2, report3). If you do not
+start your query string with one of those three words then we will assume
+the statement is ad-hoc sql to be run.
+
+    The query port is just a tcp port reading requests. The easiest way to
+talk to it is via telnet or netcat (nc). I chose this style of interface
+because it's very easy to script to.
+
+    Here's how the reports map:
+
+"- How many trips passed through a given geo-rect (defined by four lat/long
+pairs)."
+
+    - This is report1. Example:
+
+    echo "report1 37.45 37.47 -122.24 -122.29" | nc localhost 8638
+
+
+"- How many trips started or stopped within a given geo-rect, and the sum of their fares."
+
+    - This is report2. Example:
+
+    echo "report2 37.45 37.47 -122.24 -122.29" | nc localhost 8638
+
+
+ "- How many trips were occurring at a given point in time."
+
+    - This is report3. Example:
+
+    echo "report3 2013-12-25 09:32:00" | nc localhost 8638
+    
+    report3 will also run with no arguments, and will assume the time you
+    care about is now:
+
+    echo "report3" | nc localhost 8638
+
+
+Here's some example runs:
+
+-----------------------------------------------------------------------------
+ubuntu:~/uber$ time echo "report3" | nc localhost 8638
+500
+
+real    0m0.067s
+user    0m0.000s
+sys 0m0.056s
+ubuntu:~/uber$ time echo "report1 37.45 37.47 -122.24 -122.29" | nc localhost 8638
+632
+
+real    0m0.050s
+user    0m0.000s
+sys 0m0.012s
+ubuntu:~/uber$ time echo "report2 37.45 37.47 -122.24 -122.29" | nc localhost 8638
+70 22166
+
+real    0m0.039s
+user    0m0.000s
+sys 0m0.012s
+ubuntu:~/uber$ time echo "report3 2013-12-25 09:43:00" | nc localhost 8638
+500
+
+real    0m0.027s
+user    0m0.000s
+sys 0m0.024s
+-----------------------------------------------------------------------------
+
+These timings were taken on an ubuntu vmware partition on my macbook.
+
+- bugs:
+
+    I didn't handle lat/long wrap around, ie. we always assume that the
+geo rect you are querying about is from min lat to max lat, min long to max
+long. geo rects spanning 0 lat or 0 long won't work. This would be fixable
+by assuming that the smaller or (lat1 - lat2) vs (lat2 - lat1) is what is
+queried about. Some basic geo spacial library could be built to handle this.
+
+- scaleability:
+
+    The epoll interface should scale would thing out to the 10s of thousands
+of connections. To get high numbers of tripgens, the tripgen should be run
+on a seperate host from tripstore. Each of the reporting queries should be
+properly indexed and should all have running times of O(log(n)) for the search,
+but could be up to O(n) for large result sets (simply the iteration of walking
+all of the result rows for example broad geo areas).
+
+    The real limits are going to be either a) memory available, or b) the
+fact the sqlite uses a global table lock. This is also why tripstore is
+single threaded intead of thread per cpu. The single lock issue could be
+resolved with some more fine grained locking accompanied with mvcc for the
+isolation. sqlite is using that lock for both purposes (datastructure
+protectoin and isolation guarantees.)
+
+-P
+
+
+
